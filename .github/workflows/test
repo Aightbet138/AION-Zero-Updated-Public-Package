@@ -1,0 +1,37 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
+AION Zero v0.5.1-alpha — Test Results
+Test date: 2026-10-24
+Environment: Linux x86_64, Python 3.13.5, OpenJDK 21.0.12.
+Scope: Offline core, enterprise tenant/cloud policy, API surface smoke tests, optional Java Guardian Bridge, compilation and package checks.
+Automated test results
+The full 69-test set passed in segmented runs to stay within the execution harness's outer command time limit. Individual tests were not skipped or assertions reduced.
+Group	Command / run	Result
+Local CLI tests	test_aion.AionTests, split into 10 + 10 + 9 tests	29 passed
+Local enterprise execution/finance tests	python -m unittest -v test_aion.AionEnterpriseTests	10 passed
+Cloud/tenant policy and mocked AWS/Azure/GCP adapters	test_enterprise_platform.py	14 passed
+API surface smoke tests	test_enterprise_api.py	5 passed
+Java Guardian Bridge and Python integration	python -m unittest -v test_guardian_bridge.py	11 passed
+Total	Segmented test execution	69 passed, 0 failures
+
+
+A combined long-running invocation reached the outer tool time limit during the backup/restore test; that test then passed alone and in its 10-test batch. A later extracted-archive core run also reached the outer limit during the workspace-symlink rejection test; that test passed independently, as did the remaining tests in the final bounded group. All 69 test cases therefore passed in bounded runs, but an uninterrupted all-tests command is not claimed. This appears to be runner/test intermittency rather than a reported assertion failure.
+Build and configuration checks
+Check	Result	Scope and caveat
+python -m py_compile for project and test sources	Passed	Syntax only.
+./java-bridge/build.sh	Passed	Compiled Java source with --release 21, created the JAR and passed a local policy self-test.
+Java policy behaviour	Passed	Tests cover read-only allow, approval required, critical and prohibited-operation denial, secrets denial and dry-run never enabling execution.
+Java bridge integration	Passed	Existing approved local diagnostic runner runs an extra preflight when a compatible runtime and JAR are present.
+Local Ollama inference	Not run	No live Ollama service/model was used here; installation and offline steps are documented in OLLAMA_SETUP.md.
+PostgreSQL/OIDC integration, live cloud accounts, Docker deployment and capacity/load tests	Not run	Requires external services, real scoped credentials, or deployment infrastructure.
+Windows/macOS and remote GitHub CI	Not run in this session	A dedicated Java CI job was added; remote workflow results must still be reviewed after push.
+
+
+Security and scope boundaries
+- The Java bridge is not a sandbox, signed approval service, or OS/cloud security boundary. Its local --human-approved flag is an operator attestation only.
+- Without Java 21+ or the JAR, existing Python allowlists and approval gates remain active. When a compatible bridge is detected but fails, the local approved diagnostic runner fails closed.
+- Ollama is optional and contacted on 127.0.0.1:11434 only by AION's existing model workflows. Downloaded model weights have independent license terms and are not bundled.
+- Mocked cloud tests do not establish live AWS/Azure/GCP permissions or behavior. No 1,000+ tenant load test, signed corporate approval workflow, or autonomous enterprise worker pool is certified.
+- Passing tests are not a penetration test, security certification, or proof of production readiness.
+Exact release archive verification
+The final AION_Zero_v0.5.1-alpha_Ollama_Java_Guardian_2026-10-24.zip was extracted and checked directly. Its bundled Guardian JAR returned a valid self-test policy response, all 11 Guardian tests passed, all 19 platform/API tests passed, and Python compilation plus the 39 core/enterprise test cases passed across bounded runs (with the runner-timeout note above). The archive contains 76 files; 72 text/code files were scanned with zero high-confidence secret-pattern findings. ZIP integrity and SHA-256 matched, and runtime databases, caches, logs, virtual environments and non-example .env files were excluded.
