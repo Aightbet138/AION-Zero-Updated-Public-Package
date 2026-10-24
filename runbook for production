@@ -1,0 +1,83 @@
+# AION Zero SaaS production runbook
+
+SPDX-License-Identifier: Apache-2.0
+
+This runbook is a deployment template, not a claim of production certification. A production owner must complete a threat model, load/capacity qualification, legal review, access-control review, and incident/recovery exercises before onboarding real customers.
+
+## 1. Architecture and trust boundaries
+
+- Internet HTTPS terminates at Caddy; only Caddy publishes ports 80/443. Do not publish the API, worker, or PostgreSQL publicly.
+- Use an externally managed PostgreSQL service with TLS certificate verification, encryption at rest, private network access, automated backups, PITR where available, and monitoring.
+- API, worker, and migration traffic use three distinct database roles and separate secret files. Never use the PostgreSQL superuser for API or worker runtime.
+- The worker pool processes multiple tenants, but it cannot directly select tenant tables. Cloud-connection and knowledge lookup procedures derive tenant scope from the worker's currently leased job (migration 002), and reject fabricated jobs or wrong lease owners. A shared pool remains a privileged cross-tenant trust boundary because workers may claim jobs for multiple tenants; isolate worker hosts, restrict cloud egress, monitor every worker release, and use short-lived customer cloud identities.
+- Cloud connections are read-only inventory bindings. Cloud mutations, payments, external messaging, destructive actions, and model-generated command execution are not enabled by this foundation.
+
+## 2. Required environment and identity setup
+
+1. Provision a domain and DNS records pointing to the ingress host. Open inbound TCP 80/443 (and UDP 443 only if HTTP/3 is intentionally enabled).
+2. Configure an OIDC issuer, audience, and HTTPS JWKS URL. Tenant and role claims must be minted by the trusted identity provider, not supplied by the client application.
+3. Configure `AION_API_DATABASE_URL_FILE`, `AION_WORKER_DATABASE_URL_FILE`, and `AION_MIGRATION_DATABASE_URL_FILE` as separate protected files. Runtime DSNs must specify `sslmode=verify-full` and the correct CA/hostname.
+4. Put database credentials and the API metrics token and a different worker metrics token in the deployment secret store or root-owned files readable only by the service. Do not put values in source control, image layers, command-line arguments, logs, or tickets.
+5. Configure provider secret-manager allowlists: `AION_TENANT_SECRETS_VAULT_URL`, `AION_AWS_SECRETS_ACCOUNT_ID`, and `AION_GCP_SECRETS_PROJECT_ID`. Apply IAM policies that allow only tenant-namespaced references.
+6. Set `AION_ENTERPRISE_IMAGE` and `AION_CADDY_IMAGE` to reviewed immutable digest references, not mutable tags. Build and scan the image in CI, sign it where supply-chain tooling is available, and retain the build provenance.
+
+## 3. First deployment / schema migration
+
+Use a reviewed change window and a tested backup before changing schema.
+
+```bash
+# Export file paths (not secret contents) into the protected deploy environment.
+export AION_ENTERPRISE_IMAGE='registry.example.com/aion@sha256:REPLACE_WITH_DIGEST'
+export AION_CADDY_IMAGE='caddy@sha256:REPLACE_WITH_REVIEWED_DIGEST'
+# Validate compose expansion and configuration without starting services.
+docker compose -f docker-compose.production.yml config --quiet
+# Run the migration profile as the dedicated migration role, then inspect output.
+docker compose -f docker-compose.production.yml --profile migrations run --rm migrate
+# Start API, worker, and ingress after migration is confirmed.
+docker compose -f docker-compose.production.yml up -d api worker caddy
+```
+
+Do not run this template with example values. The migration identity must be able to apply every migration, create/alter the `aion_functions` NOLOGIN role with the required `BYPASSRLS` privilege (subject to provider support), assign ownership of security-definer functions to that role, and drop/replace old procedures in later migrations. Managed PostgreSQL services may restrict role attributes; verify this with the provider before deployment. API/worker roles must not be migration roles. If your provider does not allow the required non-login function role, do not remove RLS/privilege guards to work around it; redesign the procedure/role arrangement and test it independently.
+
+## 4. Readiness and service operation
+
+- Verify `GET /healthz` for process liveness and `GET /readyz` for configuration plus database readiness from the private network, then verify HTTPS through ingress. `/readyz` must fail closed when production config checks fail.
+- Keep both `/metrics` endpoints private to the service network and scrape them using separate API and worker bearer tokens delivered through secret files. Worker metrics require the trusted internal network plus bearer authentication; never publish port 9100 through ingress. Do not expose either metrics endpoint to the public internet.
+- Watch 5xx rate, 429 rate, request p95/p99 latency, psycopg pool stats, queued/retry/dead-letter counts, oldest queue age, active worker jobs, job duration, lease expirations, worker heartbeat, cloud API throttles, and OIDC/JWKS failure rates. Review `deploy/monitoring/prometheus.yml` and `deploy/monitoring/aion-alerts.yml`; mount the two distinct token files and keep the monitoring network private.
+- The supplied Caddyfile uses `request_body max_size`, so pin a reviewed Caddy 2.10+ image digest. Establish service-specific SLOs with real baseline data. Do not set a public availability or latency guarantee until observed under representative load.
+- Keep production docs disabled. Apply ingress body limits, request timeout, connection limits, rate limiting/WAF, container resource limits, non-root processes, read-only filesystem, no added Linux capabilities, and private egress rules.
+
+## 5. Backup and restore
+
+Use `deploy/ops/secure_backup.py` on a hardened operations host with `pg_dump`, `pg_restore`, and `age` installed. Provide a root/service-readable DSN file with verified TLS and an age recipient/public key. Keep the age private identity offline or in a dedicated vault. The script never passes the DB password as a process argument and encrypts the archive before writing the final artifact.
+
+- Run daily encrypted backups, and use managed PITR if the database provider supports it.
+- Copy backups to a separate account/project and region with restricted deletion, retention locks where suitable, and an independently managed encryption key.
+- Verify checksums after transfer. Store manifests without connection strings, tenant content, or keys.
+- At least monthly, restore into a new isolated empty database using the matching release migration set. Verify row counts, tenant isolation, schema migration status, application readiness, and recovery duration. A backup that has not been restored is unproven.
+- Never test restore with `--clean` or against production; script restore requires a matching target database name and intentionally avoids destructive clean flags.
+
+## 6. Incident response minimum
+
+1. Page the on-call owner; record incident time, affected component, customer/tenant scope, and evidence reference.
+2. Contain: disable the affected cloud connection/tenant, stop worker consumption, revoke OIDC sessions/keys, revoke cloud role trust or secret access, or isolate ingress as applicable.
+3. Preserve restricted, tamper-resistant logs and database/provider audit events. Do not copy bearer tokens, private keys, full credentials, or unnecessary customer payload into incident tickets.
+4. Rotate affected credentials from the source of truth and verify old credentials fail. Rebuild and redeploy from reviewed source rather than patching running containers manually.
+5. Determine exposure and legal/contractual notification duties with qualified counsel and the customer security contact. Do not assume a single notification deadline covers all jurisdictions.
+6. Recover from a known-good image and backup if needed, verify tenant boundaries, monitor reoccurrence, and publish a post-incident action list.
+
+## 7. Change management / rollback
+
+- Deploy immutable images by digest and preserve previous image/migration metadata.
+- Run code, dependency, secret, SAST, API and PostgreSQL/OIDC integration tests before approval.
+- Prefer backward-compatible expand/migrate/contract schema changes. Do not edit applied migration files; create a new migration. Take and validate a backup first.
+- Roll back application image if health gates fail; database migrations require a tested forward fix or a planned point-in-time restore, not an assumed reverse migration.
+- Require two-person approval for changes to tenant isolation, auth, cloud identity, secrets, database grants, financial records, backups, and destructive controls.
+
+## 8. Readiness gates before real customers
+
+- Real PostgreSQL/OIDC integration CI is green on supported database/provider versions, including job-lease-scoped worker procedure tests and the current migrations.
+- Staging workload with representative payload sizes meets measured capacity/latency targets, including a 1,000-tenant test and soak run.
+- Tenant isolation and hostile cross-tenant tests pass; cloud identity mapping is verified against the three real providers with restricted test accounts.
+- Backup restore, credential rotation, deployment rollback, and incident simulation have written results.
+- Independent penetration test and legal/privacy/contract reviews are complete for the intended jurisdictions and data categories.
