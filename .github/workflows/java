@@ -1,0 +1,52 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
+Java Guardian Bridge: optional protection without slowing the core
+AION Zero's Python core remains the main engine. The Java bridge is a small, dependency-free policy companion: it checks a typed operation request and returns allow, needs_human_approval, or deny. It is designed as a guardian layer, not a new runtime framework or a replacement for AION's existing controls.
+
+The bridge does not invoke commands, read credentials, access the network, modify files/cloud resources, transfer funds, send customer messages, or file legal documents. The Python approved-diagnostic runner uses it as an extra preflight when a compatible Java runtime and the bundled JAR are available.
+Why it does not block momentum
+- No Maven, Gradle, database, service daemon, or third-party Java dependency is required.
+- The release includes a prebuilt JAR. The core can continue running on Python/SQLite without Java installed.
+- If Java is absent or older than 21, AION falls back to its existing Python allowlists and explicit approval gates.
+- If a compatible Java runtime and JAR are detected but the bridge fails or returns an unexpected response, that approved diagnostic is blocked before its tool runs.
+- The bridge is not yet wired into the enterprise API's future background workers. Do not claim that it guards every API request or every process on the machine.
+Runtime requirements
+- Java 21 or newer to run the included JAR; Java 25 is a current LTS option for new installations.
+- JDK 21 or newer only if you want to rebuild the JAR from source.
+- Python 3.10+ for the AION CLI.
+Official references: https://www.oracle.com/java/technologies/java-se-support-roadmap.html and https://adoptium.net/. Choose a supported OpenJDK distribution suitable for your environment.
+
+Verify Java:
+java -version
+Use the bridge from AION
+Check a low-risk local diagnostic:
+py aion.py guardian check --operation read_only_diagnostic --risk low --tenant local
+Preview a cloud mutation without authorizing execution:
+py aion.py guardian check --operation cloud_mutation --risk high --tenant demo-company --external-target --dry-run
+The preview can return decision: allow, but execution_allowed remains false because it is only a preview.
+
+Request an approval-gated assessment:
+py aion.py guardian check --operation cloud_mutation --risk high --tenant demo-company --external-target
+This returns needs_human_approval. A local operator attestation for testing can be supplied explicitly:
+py aion.py guardian check --operation cloud_mutation --risk high --tenant demo-company --external-target --human-approved
+This command does not perform the cloud mutation. An actual executor must separately enforce identity, scope, approval and audit controls.
+Build the bridge from source
+Windows PowerShell, from the repository root:
+.\java-bridge\build.ps1
+Linux/macOS:
+./java-bridge/build.sh
+The scripts compile with --release 21, package java-bridge/aion-guardian.jar, and run a basic self-test. Source is under java-bridge/src/main/java/.
+Decision policy at a glance
+Request	Guardian behavior
+Low-risk local read-only diagnostic or memory lookup	Allow within policy. Native tool allowlist still applies.
+External target, cloud mutation, file write, customer message, data export, access change or bookkeeping post	Require explicit approval unless it is only a dry-run preview.
+Suspected credentials or secrets	Deny. Redact and investigate exposure.
+Arbitrary shell/code, credential access, disabling security controls, bulk deletion, funds transfer, mass messaging or legal filing	Deny through this bridge; use separate, reviewed human-controlled processes.
+Critical-risk execution	Deny through this bridge; not covered by local approval attestation.
+Java absent/too old	Core uses its native Python controls; bridge-specific guardian check requires Java 21+.
+
+
+Critical security limitations
+The Java bridge is not a sandbox, signed approval service, policy-as-code platform, or OS security boundary. Its --human-approved flag is only a local attestation and must never be treated as authorization from an authenticated enterprise user. Any application consuming these decisions must independently authenticate the user, derive the tenant from verified identity claims, enforce least-privilege operating-system/cloud permissions, protect audit logs, and fail closed on malformed responses.
+
+The current bridge only adds a preflight to AION's local allowlisted diagnostic runner. Tenant-aware cloud workers, durable queues, rate limits, and multi-tenant approval workflows require separate implementation and review.
